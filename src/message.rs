@@ -1,4 +1,11 @@
-use crate::error::{DnsError, ParseError};
+use std::{cell::Cell, net::IpAddr};
+
+use crate::{
+    compression::{CompressedName, decompress, is_pointer},
+    error::{DnsError, ParseError, ResponseCodeError},
+    net::bytes_to_ip,
+    server_info::ServerInfo,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Message<'a> {
@@ -11,7 +18,7 @@ pub struct Message<'a> {
 
 #[derive(Debug, PartialEq, Eq)]
 struct Header {
-    id: u16,
+    id: Cell<u16>,
     flags: u16,
     qdcount: u16,
     ancount: u16,
@@ -36,6 +43,13 @@ struct ResourceRecord<'a> {
     rdata: &'a [u8],
 }
 
+#[derive(Debug)]
+pub enum ResponseType {
+    Answer,
+    Delegation,
+    Error,
+}
+
 impl<'a> Message<'a> {
     pub fn new(id: u16, domain: &'a [u8]) -> Self {
         Self {
@@ -51,20 +65,69 @@ impl<'a> Message<'a> {
         }
     }
 
-    pub fn check_error(&self) -> Result<(), DnsError> {
-        self.header.check_error()
+    pub fn get_ancount(&self) -> u16 {
+        self.header.ancount
     }
 
-    pub fn get_ips(&self) -> Option<Vec<&[u8]>> {
-        if self.header.arcount == 0 {
-            return None;
+    pub fn get_nscount(&self) -> u16 {
+        self.header.nscount
+    }
+
+    pub fn get_arcount(&self) -> u16 {
+        self.header.arcount
+    }
+
+    pub fn check_error_response(&self, request: &Message) -> Result<(), DnsError> {
+        self.header.check_error()?;
+        (self.header.id == request.header.id)
+            .then_some(())
+            .ok_or(DnsError::InvalidResponseID)
+    }
+
+    pub fn inc(&self) {
+        self.header.id.set(self.header.id.get() + 1)
+    }
+
+    pub fn get_type(&self) -> ResponseType {
+        if self.header.ancount > 0 {
+            return ResponseType::Answer;
         }
-        let mut ips = Vec::with_capacity(self.header.arcount as usize);
-        for answer in &self.additionals {
-            ips.push(answer.rdata);
+        if self.header.nscount > 0 {
+            return ResponseType::Delegation;
+        }
+        ResponseType::Error
+    }
+
+    pub fn get_additional_info(&self, bytes: &'a [u8]) -> Vec<ServerInfo> {
+        let mut servers = Vec::with_capacity(self.header.arcount as usize);
+        for additional in &self.additionals {
+            servers.push(ServerInfo {
+                name: decompress(additional.rname, bytes),
+                ip: bytes_to_ip(additional.rdata),
+            });
         }
 
-        Some(ips)
+        servers
+    }
+
+    pub fn get_authorities_info(&self, bytes: &'a [u8]) -> Vec<CompressedName> {
+        let mut names = Vec::with_capacity(self.header.nscount as usize);
+        for additional in &self.authorities {
+            names.push(decompress(additional.rdata, bytes));
+        }
+
+        names
+    }
+
+    pub fn get_answer_ips(&self) -> Vec<IpAddr> {
+        let mut ips = Vec::with_capacity(self.header.ancount as usize);
+        for answer in &self.answers {
+            if let Some(ip) = bytes_to_ip(answer.rdata) {
+                ips.push(ip);
+            }
+        }
+
+        ips
     }
 
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
@@ -122,7 +185,7 @@ impl Header {
             flags |= 1 << 8;
         }
         Self {
-            id,
+            id: id.into(),
             flags,
             qdcount: 1,
             ancount: 0,
@@ -136,7 +199,7 @@ impl Header {
             return Err(ParseError::InvalidHeader);
         }
         Ok(Header {
-            id: u16::from_be_bytes([bytes[0], bytes[1]]),
+            id: u16::from_be_bytes([bytes[0], bytes[1]]).into(),
             flags: u16::from_be_bytes([bytes[2], bytes[3]]),
             qdcount: u16::from_be_bytes([bytes[4], bytes[5]]),
             ancount: u16::from_be_bytes([bytes[6], bytes[7]]),
@@ -145,14 +208,14 @@ impl Header {
         })
     }
 
-    fn check_error(&self) -> Result<(), DnsError> {
+    fn check_error(&self) -> Result<(), ResponseCodeError> {
         match self.flags & 0xf {
             0 => Ok(()),
-            1 => Err(DnsError::FormatError),
-            2 => Err(DnsError::ServerFailure),
-            3 => Err(DnsError::NameError),
-            4 => Err(DnsError::NotImplemented),
-            5 => Err(DnsError::Refused),
+            1 => Err(ResponseCodeError::FormatError),
+            2 => Err(ResponseCodeError::ServerFailure),
+            3 => Err(ResponseCodeError::NameError),
+            4 => Err(ResponseCodeError::NotImplemented),
+            5 => Err(ResponseCodeError::Refused),
             _ => Ok(()),
         }
     }
@@ -162,6 +225,10 @@ impl<'a> Question<'a> {
     fn from_bytes(bytes: &'a [u8], offset: usize) -> Result<(Self, usize), ParseError> {
         let mut end = offset;
         while end < bytes.len() && bytes[end] != 0 {
+            if is_pointer(bytes[end]) {
+                end += 1;
+                break;
+            }
             let label_len = bytes[end] as usize;
             end += 1 + label_len;
         }
@@ -189,7 +256,7 @@ impl<'a> ResourceRecord<'a> {
     fn from_bytes(bytes: &'a [u8], offset: usize) -> Result<(Self, usize), ParseError> {
         let mut end = offset;
         while end < bytes.len() && bytes[end] != 0 {
-            if bytes[end] & 0b11000000 == 0b11000000 {
+            if is_pointer(bytes[end]) {
                 end += 1;
                 break;
             }
@@ -255,7 +322,7 @@ impl Encodable for Message<'_> {
 
 impl Encodable for Header {
     fn encode(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&self.id.to_be_bytes());
+        buf.extend_from_slice(&self.id.get().to_be_bytes());
         buf.extend_from_slice(&self.flags.to_be_bytes());
         buf.extend_from_slice(&self.qdcount.to_be_bytes());
         buf.extend_from_slice(&self.ancount.to_be_bytes());

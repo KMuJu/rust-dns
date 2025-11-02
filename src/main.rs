@@ -2,7 +2,7 @@ use rust_dns::{algorithm::query_domain, compression::compress_domain, error::Dns
 
 fn main() -> Result<(), DnsError> {
     let domain = "www.batimes.com.ar";
-    // let domain = "vg.no";
+    // let domain = "nrk.no";
     // let domain = "google.com";
     let compressed_domain = compress_domain(domain);
     let ips = query_domain(&compressed_domain)?;

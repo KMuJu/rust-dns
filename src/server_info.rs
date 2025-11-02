@@ -1,14 +1,15 @@
-use std::net::IpAddr;
+use std::{cmp::Reverse, net::IpAddr};
 
 use crate::compression::CompressedName;
 
-pub struct ServerInfo<'a> {
-    pub name: CompressedName<'a>,
+#[derive(Clone)]
+pub struct ServerInfo {
+    pub name: CompressedName,
     pub ip: Option<IpAddr>,
 }
 
 /// Assumes server list is not empty
-pub fn get_best_server(servers: &[ServerInfo<'_>], target: &[u8]) -> usize {
+pub fn get_best_server(servers: &[ServerInfo], target: &[u8]) -> usize {
     let mut max_score: u32 = 0;
     let mut index: usize = 0;
     for (i, server) in servers.iter().enumerate() {
@@ -22,12 +23,12 @@ pub fn get_best_server(servers: &[ServerInfo<'_>], target: &[u8]) -> usize {
     index
 }
 
-pub fn sort_server_list(servers: &mut [ServerInfo<'_>], target: &[u8]) {
-    servers.sort_by_key(|s| score_server(s, target));
+pub fn sort_server_list(servers: &mut [ServerInfo], target: &[u8]) {
+    servers.sort_by_key(|s| Reverse(score_server(s, target)));
 }
 
 fn score_server(server: &ServerInfo, target: &[u8]) -> u32 {
-    let v: &[&[u8]] = server.name.get_parts();
+    let v: &Vec<Vec<u8>> = &server.name.0;
     let mut score = 0;
     let target_len = target.len();
 
@@ -56,7 +57,7 @@ mod test {
             1, b'f', 3, b'i', b's', b'i', 4, b'a', b'r', b'p', b'a', 0, 3, b'f', b'o', b'o',
             0b11000000, 0, 0,
         ];
-        let name = CompressedName(vec![&message[12..12 + 4], &message[..11]]); // foo.fisi.arpa
+        let name = CompressedName(vec![message[12..12 + 4].to_vec(), message[..11].to_vec()]); // foo.fisi.arpa
 
         let server = ServerInfo { name, ip: None };
         let target = [1, b'f', 4, b'a', b'r', b'p', b'a']; // f.arpa

@@ -1,5 +1,7 @@
 use std::{cell::Cell, net::IpAddr};
 
+use rand::random;
+
 use crate::{
     compression::{CompressedName, decompress, is_pointer},
     error::{DnsError, ParseError, ResponseCodeError},
@@ -65,6 +67,10 @@ impl<'a> Message<'a> {
         }
     }
 
+    pub fn get_id(&self) -> u16 {
+        self.header.id.get()
+    }
+
     pub fn get_ancount(&self) -> u16 {
         self.header.ancount
     }
@@ -82,6 +88,10 @@ impl<'a> Message<'a> {
         (self.header.id == request.header.id)
             .then_some(())
             .ok_or(DnsError::InvalidResponseID)
+    }
+
+    pub fn new_id(&self) {
+        self.header.id.set(random::<u16>());
     }
 
     pub fn inc(&self) {
@@ -278,6 +288,9 @@ impl<'a> ResourceRecord<'a> {
         ]);
         let rdlength = u16::from_be_bytes([bytes[end + 8], bytes[end + 9]]);
         end += 10;
+        if end + (rdlength as usize) > bytes.len() {
+            return Err(ParseError::InvalidResourcRecord);
+        }
         let rdata = &bytes[end..end + rdlength as usize];
         end += rdlength as usize;
         Ok((
@@ -306,16 +319,16 @@ impl Encodable for Message<'_> {
             question.encode(buf);
         }
 
-        for question in &self.answers {
-            question.encode(buf);
+        for rr in &self.answers {
+            rr.encode(buf);
         }
 
-        for question in &self.authorities {
-            question.encode(buf);
+        for rr in &self.authorities {
+            rr.encode(buf);
         }
 
-        for question in &self.additionals {
-            question.encode(buf);
+        for rr in &self.additionals {
+            rr.encode(buf);
         }
     }
 }
@@ -348,6 +361,35 @@ impl Encodable for ResourceRecord<'_> {
         buf.extend_from_slice(&self.rdlength.to_be_bytes());
         buf.extend_from_slice(self.rdata);
     }
+}
+
+pub fn error_in_message(id: u16, bytes: &[u8]) -> Result<(), DnsError> {
+    if bytes.len() < 12 {
+        return Err(DnsError::ParsingError(ParseError::InvalidHeader));
+    }
+    let resp_id = u16::from_be_bytes([bytes[0], bytes[1]]);
+    let flags = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let ancount = u16::from_be_bytes([bytes[6], bytes[7]]);
+    let nscount = u16::from_be_bytes([bytes[8], bytes[9]]);
+
+    if id != resp_id {
+        return Err(DnsError::InvalidResponseID);
+    }
+    match flags & 0xf {
+        0 => Ok(()),
+        1 => Err(ResponseCodeError::FormatError),
+        2 => Err(ResponseCodeError::ServerFailure),
+        3 => Err(ResponseCodeError::NameError),
+        4 => Err(ResponseCodeError::NotImplemented),
+        5 => Err(ResponseCodeError::Refused),
+        _ => Ok(()),
+    }?;
+
+    if ancount == 0 && nscount == 0 {
+        return Err(DnsError::InvalidFormat);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -439,5 +481,28 @@ mod test {
             }
             _ => panic!("Message::from_bytes failed"),
         }
+    }
+
+    #[test]
+    fn test_rr_from_bytes_out_of_bounds() {
+        // minimal invalid record: too short for rdata
+        let bad = [
+            3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm',
+            0, 0, 1, 0, 1, // type/class
+            0, 0, 0, 0, // ttl
+            0, 4, // rdlength claims 4
+            1, 2, // but only 2 bytes of rdata!
+        ];
+        let result = ResourceRecord::from_bytes(&bad, 0);
+        assert!(matches!(result, Err(ParseError::InvalidResourcRecord)));
+    }
+
+    #[test]
+    fn test_header_flags_rcode_handling() {
+        let mut bytes = [0u8; 12];
+        bytes[3] = 3; // set rcode = 3 (NameError)
+        let header = Header::from_bytes(&bytes).unwrap();
+        let res = header.check_error();
+        assert!(matches!(res, Err(ResponseCodeError::NameError)));
     }
 }

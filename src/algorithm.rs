@@ -1,17 +1,21 @@
 use std::{
-    net::{IpAddr, SocketAddr, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     time::Duration,
 };
 
+use rand::random;
+
 use crate::{
+    compression::CompressedName,
     error::DnsError,
-    message::{Encodable, Message, ResponseType},
-    server_info::get_best_server,
+    message::{Encodable, Message, ResponseType, error_in_message},
+    net::convert_mapped_addr,
+    server_info::{ServerInfo, sort_server_list},
 };
 
 const MAX_DEPTH: usize = 8;
 const PORT: u16 = 53;
-const ROOT_SERVER: ([u8; 4], u16) = ([198, 41, 0, 4], PORT);
+const ROOT_SERVER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 41, 0, 4));
 
 fn print_domain(domain: &[u8]) {
     for &b in &domain[1..] {
@@ -24,31 +28,60 @@ fn print_domain(domain: &[u8]) {
 }
 
 pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
-    let message = Message::new(1, domain);
+    let message = Message::new(random::<u16>(), domain);
     print!("\nQuerying for domain: ");
     print_domain(domain);
     println!();
 
-    // println!("First message: {:?}\n", message);
-
-    let mut sock_addr = SocketAddr::from(ROOT_SERVER);
     let socket = UdpSocket::bind("[::]:0")?;
     socket.set_read_timeout(Some(Duration::new(5, 0)))?;
 
-    // socket.connect(sock_addr)?;
-    for i in 0..MAX_DEPTH {
-        println!("[{}] Sending message to: {:?}", i, sock_addr);
-        // println!("Sending message: {:?}\n", message);
+    let mut servers = vec![ServerInfo {
+        name: CompressedName(Vec::new()),
+        ip: Some(ROOT_SERVER_IP),
+    }];
 
+    for i in 0..MAX_DEPTH {
         let mut buf = Vec::new();
         let mut recv = [0u8; 512];
         message.encode(&mut buf);
+        let mut len = 0;
 
-        socket.send_to(&buf, sock_addr)?;
-        let len = socket.recv(&mut recv)?;
-        let response = Message::from_bytes(&recv[..len])?;
-        response.check_error_response(&message)?;
+        let mut got_valid_response = false;
+        for server in servers.iter() {
+            let ip = server.ip.unwrap_or(ROOT_SERVER_IP);
+            println!("[{}] Sending message to: {:?}", i, ip);
+            if let Err(e) = socket.send_to(&buf, SocketAddr::new(ip, PORT)) {
+                eprintln!("Errored in send_to: {}", e);
+                continue;
+            }
+            match socket.recv_from(&mut recv) {
+                Ok((l, recv_addr)) => {
+                    let recv_ip = convert_mapped_addr(recv_addr.ip());
+                    if recv_ip != ip {
+                        eprintln!(
+                            "Received ip({}) is not the same as the one sent to({})",
+                            recv_ip, ip
+                        );
+                        continue;
+                    }
+                    len = l;
+                    if error_in_message(message.get_id(), &recv[..len]).is_ok() {
+                        got_valid_response = true;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Could not receive from socket: {}", e);
+                }
+            }
+        }
+        if !got_valid_response {
+            return Err(DnsError::NoAvailableServers);
+        }
 
+        let resp_bytes = &recv[..len];
+        let response = Message::from_bytes(resp_bytes)?;
         let response_type = response.get_type();
 
         match response_type {
@@ -59,11 +92,8 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
             }
             ResponseType::Delegation => {
                 if response.get_arcount() > 0 {
-                    let servers = response.get_additional_info(&recv[..len]);
-                    let best_index = get_best_server(&servers, domain);
-                    let ip = servers[best_index].ip.ok_or(DnsError::InvalidFormat)?;
-                    println!("Best server: {} - {:?}", servers[best_index].name, ip);
-                    sock_addr = SocketAddr::new(ip, PORT);
+                    servers = response.get_additional_info(resp_bytes);
+                    sort_server_list(&mut servers, domain);
                     message.inc();
                 } else {
                     let names = response.get_authorities_info(&recv[..len]);
@@ -72,14 +102,17 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
                     }
                     for name in names {
                         if let Ok(ips) = query_domain(&name.to_vec()) {
-                            sock_addr = SocketAddr::new(ips[0], PORT);
+                            servers = ips
+                                .iter()
+                                .map(|&ip| ServerInfo {
+                                    name: CompressedName(Vec::new()),
+                                    ip: Some(ip),
+                                })
+                                .collect();
                             message.inc();
+                            break;
                         }
                     }
-                    // for &ip in ips.iter() {
-                    //     println!("{:?}", ip);
-                    // }
-                    // break;
                 }
             }
         };

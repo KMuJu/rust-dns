@@ -16,3 +16,10 @@ pub fn bytes_to_ip(ip: &[u8]) -> Option<IpAddr> {
         _ => None,
     }
 }
+
+pub fn convert_mapped_addr(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some() => IpAddr::V4(v6.to_ipv4_mapped().unwrap()),
+        other => other,
+    }
+}

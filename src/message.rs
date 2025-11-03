@@ -108,7 +108,22 @@ impl<'a> Message<'a> {
         ResponseType::Error
     }
 
-    pub fn get_additional_info(&self, bytes: &'a [u8]) -> Vec<ServerInfo> {
+    pub fn is_cname(&self) -> bool {
+        self.answers.iter().any(|a| a.rtype == 5)
+    }
+
+    pub fn get_cnames(&self, bytes: &[u8]) -> Vec<CompressedName> {
+        let mut cnames = Vec::new();
+        for answer in self.answers.iter() {
+            if answer.rtype != 5 {
+                continue;
+            }
+            cnames.push(decompress(answer.rdata, bytes));
+        }
+        cnames
+    }
+
+    pub fn get_additional_info(&self, bytes: &[u8]) -> Vec<ServerInfo> {
         let mut servers = Vec::with_capacity(self.header.arcount as usize);
         for additional in &self.additionals {
             servers.push(ServerInfo {
@@ -120,7 +135,7 @@ impl<'a> Message<'a> {
         servers
     }
 
-    pub fn get_authorities_info(&self, bytes: &'a [u8]) -> Vec<CompressedName> {
+    pub fn get_authorities_info(&self, bytes: &[u8]) -> Vec<CompressedName> {
         let mut names = Vec::with_capacity(self.header.nscount as usize);
         for additional in &self.authorities {
             names.push(decompress(additional.rdata, bytes));
@@ -132,6 +147,9 @@ impl<'a> Message<'a> {
     pub fn get_answer_ips(&self) -> Vec<IpAddr> {
         let mut ips = Vec::with_capacity(self.header.ancount as usize);
         for answer in &self.answers {
+            if answer.rtype != 1 {
+                continue;
+            }
             if let Some(ip) = bytes_to_ip(answer.rdata) {
                 ips.push(ip);
             }

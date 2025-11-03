@@ -69,6 +69,8 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
                     if error_in_message(message.get_id(), &recv[..len]).is_ok() {
                         got_valid_response = true;
                         break;
+                    } else {
+                        eprintln!("Error in message");
                     }
                 }
                 Err(e) => {
@@ -85,10 +87,24 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
         let response_type = response.get_type();
 
         match response_type {
-            ResponseType::Error => return Err(DnsError::InvalidFormat),
+            ResponseType::Error => {
+                eprintln!("Invalid format of response");
+                return Err(DnsError::InvalidFormat);
+            }
             ResponseType::Answer => {
                 let ips = response.get_answer_ips();
-                return Ok(ips);
+                if !ips.is_empty() {
+                    return Ok(ips);
+                }
+                let cnames = response.get_cnames(resp_bytes);
+                for name in cnames {
+                    println!("- {}", name);
+                    match query_domain(&name.to_vec()) {
+                        Ok(ips) => return Ok(ips),
+                        Err(e) => eprintln!("Error when querying cname: {}", e),
+                    };
+                }
+                break;
             }
             ResponseType::Delegation => {
                 if response.get_arcount() > 0 {
@@ -100,17 +116,26 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
                     for name in names.iter() {
                         println!("- {}", name);
                     }
+                    if names.is_empty() {
+                        eprintln!("No names in authorities");
+                        return Err(DnsError::InvalidFormat);
+                    }
                     for name in names {
-                        if let Ok(ips) = query_domain(&name.to_vec()) {
-                            servers = ips
-                                .iter()
-                                .map(|&ip| ServerInfo {
-                                    name: CompressedName(Vec::new()),
-                                    ip: Some(ip),
-                                })
-                                .collect();
-                            message.inc();
-                            break;
+                        match query_domain(&name.to_vec()) {
+                            Ok(ips) => {
+                                servers = ips
+                                    .iter()
+                                    .map(|&ip| ServerInfo {
+                                        name: CompressedName(Vec::new()),
+                                        ip: Some(ip),
+                                    })
+                                    .collect();
+                                message.inc();
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("Error quering: {}", e);
+                            }
                         }
                     }
                 }

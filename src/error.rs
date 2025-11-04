@@ -33,6 +33,9 @@ pub enum ResponseCodeError {
 
 #[derive(Debug, Error)]
 pub enum DnsError {
+    #[error("Wrong args")]
+    WrongArgs,
+
     #[error("Failed to parse DNS message: {0}")]
     ParsingError(#[from] ParseError),
 

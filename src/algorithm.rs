@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use log::{debug, error};
 use rand::random;
 
 use crate::{
@@ -17,14 +18,16 @@ const MAX_DEPTH: usize = 8;
 const PORT: u16 = 53;
 const ROOT_SERVER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 41, 0, 4));
 
-fn print_domain(domain: &[u8]) {
+fn print_domain(domain: &[u8]) -> String {
+    let mut s = String::with_capacity(domain.len() - 1);
     for &b in &domain[1..] {
         if b < 32 {
-            print!(".");
+            s.push('.');
         } else {
-            print!("{}", b as char);
+            s.push(b as char);
         }
     }
+    s
 }
 
 /// Sends message to the servers, quitting after the first received packet that has no error
@@ -43,16 +46,16 @@ fn send_and_receive(
 
     for server in servers.iter() {
         let ip = server.ip.unwrap_or(ROOT_SERVER_IP);
-        println!("Sending message to: {:?}", ip);
+        debug!("Sending message to: {:?}", ip);
         if let Err(e) = socket.send_to(&buf, SocketAddr::new(ip, PORT)) {
-            eprintln!("Errored in send_to: {}", e);
+            error!("Errored in send_to: {}", e);
             continue;
         }
         match socket.recv_from(&mut recv) {
             Ok((l, recv_addr)) => {
                 let recv_ip = convert_mapped_addr(recv_addr.ip());
                 if recv_ip != ip {
-                    eprintln!(
+                    error!(
                         "Received ip({}) is not the same as the one sent to({})",
                         recv_ip, ip
                     );
@@ -63,7 +66,7 @@ fn send_and_receive(
                 }
             }
             Err(e) => {
-                eprintln!("Could not receive from socket: {}", e);
+                error!("Could not receive from socket: {}", e);
             }
         }
     }
@@ -101,7 +104,7 @@ fn handle_delegation(
 
     let names = response.get_authorities_info(resp_bytes);
     for name in names.iter() {
-        println!("- {}", name);
+        debug!("- {}", name);
     }
     if names.is_empty() {
         return Err(DnsError::InvalidFormat);
@@ -118,7 +121,7 @@ fn handle_delegation(
                     .collect());
             }
             Err(e) => {
-                eprintln!("Error quering: {}", e);
+                error!("Error quering: {}", e);
             }
         }
     }
@@ -128,9 +131,8 @@ fn handle_delegation(
 
 pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
     let message = Message::new(random::<u16>(), domain);
-    print!("\nQuerying for domain: ");
-    print_domain(domain);
-    println!();
+    debug!("Querying domain: {}", print_domain(domain));
+    debug!("");
 
     let socket = UdpSocket::bind("[::]:0")?;
     socket.set_read_timeout(Some(Duration::new(5, 0)))?;
@@ -147,7 +149,7 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
 
         match response_type {
             ResponseType::Error => {
-                eprintln!("Invalid format of response");
+                error!("Invalid format of response");
                 return Err(DnsError::InvalidFormat);
             }
             ResponseType::Answer => {
@@ -159,7 +161,7 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
                 for name in cnames {
                     match query_domain(&name.to_vec()) {
                         Ok(ips) => return Ok(ips),
-                        Err(e) => eprintln!("Error when querying cname: {}", e),
+                        Err(e) => error!("Error when querying cname: {}", e),
                     };
                 }
                 break;

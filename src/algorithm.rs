@@ -27,6 +27,105 @@ fn print_domain(domain: &[u8]) {
     }
 }
 
+/// Sends message to the servers, quitting after the first received packet that has no error
+///
+/// # Errors
+///
+/// This function will return an error if every server responds with error
+fn send_and_receive(
+    message: &Message,
+    socket: &UdpSocket,
+    servers: &[ServerInfo],
+) -> Result<Vec<u8>, DnsError> {
+    let mut buf = Vec::new();
+    let mut recv = [0u8; 512];
+    message.encode(&mut buf);
+
+    for server in servers.iter() {
+        let ip = server.ip.unwrap_or(ROOT_SERVER_IP);
+        println!("Sending message to: {:?}", ip);
+        if let Err(e) = socket.send_to(&buf, SocketAddr::new(ip, PORT)) {
+            eprintln!("Errored in send_to: {}", e);
+            continue;
+        }
+        match socket.recv_from(&mut recv) {
+            Ok((l, recv_addr)) => {
+                let recv_ip = convert_mapped_addr(recv_addr.ip());
+                if recv_ip != ip {
+                    eprintln!(
+                        "Received ip({}) is not the same as the one sent to({})",
+                        recv_ip, ip
+                    );
+                    continue;
+                }
+                if error_in_message(message.get_id(), &recv[..l]).is_ok() {
+                    return Ok(recv[..l].to_vec());
+                }
+            }
+            Err(e) => {
+                eprintln!("Could not receive from socket: {}", e);
+            }
+        }
+    }
+
+    Err(DnsError::NoAvailableServers)
+}
+
+/// Handles the delegation returning the new servers list
+///
+/// # Errors
+///
+/// This function will return an error if there is no additionals and (no names in authorities, or if query domain errors for each name)
+///
+/// # Structure
+///
+/// if there are additional rrs
+///     => next server ips are stored in their rdata
+///
+/// else if there are no authority rrs
+///     => Error (should always have either additional or authority rrs)
+///
+/// else
+///     => Authority rrs store the domains of servers with better answer
+///     => Query the domains stored in the authority rrs
+fn handle_delegation(
+    response: &Message,
+    resp_bytes: &[u8],
+    domain: &[u8],
+) -> Result<Vec<ServerInfo>, DnsError> {
+    if response.get_arcount() > 0 {
+        let mut servers = response.get_additional_info(resp_bytes);
+        sort_server_list(&mut servers, domain);
+        return Ok(servers);
+    }
+
+    let names = response.get_authorities_info(resp_bytes);
+    for name in names.iter() {
+        println!("- {}", name);
+    }
+    if names.is_empty() {
+        return Err(DnsError::InvalidFormat);
+    }
+    for name in names {
+        match query_domain(&name.to_vec()) {
+            Ok(ips) => {
+                return Ok(ips
+                    .iter()
+                    .map(|&ip| ServerInfo {
+                        name: CompressedName(Vec::new()),
+                        ip: Some(ip),
+                    })
+                    .collect());
+            }
+            Err(e) => {
+                eprintln!("Error quering: {}", e);
+            }
+        }
+    }
+
+    Err(DnsError::InvalidDelegation)
+}
+
 pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
     let message = Message::new(random::<u16>(), domain);
     print!("\nQuerying for domain: ");
@@ -37,52 +136,12 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
     socket.set_read_timeout(Some(Duration::new(5, 0)))?;
 
     let mut servers = vec![ServerInfo {
-        name: CompressedName(Vec::new()),
+        name: CompressedName(vec![b".".to_vec()]), // Empty
         ip: Some(ROOT_SERVER_IP),
     }];
 
-    for i in 0..MAX_DEPTH {
-        let mut buf = Vec::new();
-        let mut recv = [0u8; 512];
-        message.encode(&mut buf);
-        let mut len = 0;
-
-        let mut got_valid_response = false;
-        for server in servers.iter() {
-            let ip = server.ip.unwrap_or(ROOT_SERVER_IP);
-            println!("[{}] Sending message to: {:?}", i, ip);
-            if let Err(e) = socket.send_to(&buf, SocketAddr::new(ip, PORT)) {
-                eprintln!("Errored in send_to: {}", e);
-                continue;
-            }
-            match socket.recv_from(&mut recv) {
-                Ok((l, recv_addr)) => {
-                    let recv_ip = convert_mapped_addr(recv_addr.ip());
-                    if recv_ip != ip {
-                        eprintln!(
-                            "Received ip({}) is not the same as the one sent to({})",
-                            recv_ip, ip
-                        );
-                        continue;
-                    }
-                    len = l;
-                    if error_in_message(message.get_id(), &recv[..len]).is_ok() {
-                        got_valid_response = true;
-                        break;
-                    } else {
-                        eprintln!("Error in message");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Could not receive from socket: {}", e);
-                }
-            }
-        }
-        if !got_valid_response {
-            return Err(DnsError::NoAvailableServers);
-        }
-
-        let resp_bytes = &recv[..len];
+    for _ in 0..MAX_DEPTH {
+        let resp_bytes = &send_and_receive(&message, &socket, &servers)?;
         let response = Message::from_bytes(resp_bytes)?;
         let response_type = response.get_type();
 
@@ -98,7 +157,6 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
                 }
                 let cnames = response.get_cnames(resp_bytes);
                 for name in cnames {
-                    println!("- {}", name);
                     match query_domain(&name.to_vec()) {
                         Ok(ips) => return Ok(ips),
                         Err(e) => eprintln!("Error when querying cname: {}", e),
@@ -107,38 +165,8 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
                 break;
             }
             ResponseType::Delegation => {
-                if response.get_arcount() > 0 {
-                    servers = response.get_additional_info(resp_bytes);
-                    sort_server_list(&mut servers, domain);
-                    message.inc();
-                } else {
-                    let names = response.get_authorities_info(&recv[..len]);
-                    for name in names.iter() {
-                        println!("- {}", name);
-                    }
-                    if names.is_empty() {
-                        eprintln!("No names in authorities");
-                        return Err(DnsError::InvalidFormat);
-                    }
-                    for name in names {
-                        match query_domain(&name.to_vec()) {
-                            Ok(ips) => {
-                                servers = ips
-                                    .iter()
-                                    .map(|&ip| ServerInfo {
-                                        name: CompressedName(Vec::new()),
-                                        ip: Some(ip),
-                                    })
-                                    .collect();
-                                message.inc();
-                                break;
-                            }
-                            Err(e) => {
-                                eprintln!("Error quering: {}", e);
-                            }
-                        }
-                    }
-                }
+                servers = handle_delegation(&response, resp_bytes, domain)?;
+                message.inc();
             }
         };
     }

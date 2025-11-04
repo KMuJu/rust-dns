@@ -53,4 +53,7 @@ pub enum DnsError {
 
     #[error("No available servers")]
     NoAvailableServers,
+
+    #[error("Error in delegation")]
+    InvalidDelegation,
 }

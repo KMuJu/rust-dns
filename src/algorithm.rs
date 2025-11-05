@@ -16,6 +16,7 @@ use crate::{
 const MAX_DEPTH: usize = 8;
 const PORT: u16 = 53;
 const ROOT_SERVER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 41, 0, 4));
+const GOOGLE_SERVER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
 
 fn print_domain(domain: &[u8]) -> String {
     let mut s = String::with_capacity(domain.len() - 1);
@@ -129,7 +130,7 @@ fn handle_delegation(
 }
 
 pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
-    let message = Message::new(random::<u16>(), domain);
+    let message = Message::new(random::<u16>(), domain, false);
     vprintln!("Querying domain: {}", print_domain(domain));
     vprintln!("");
 
@@ -173,4 +174,39 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
     }
 
     Err(DnsError::MaxDepth)
+}
+
+pub fn recursive_query(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
+    let message = Message::new(random::<u16>(), domain, true);
+    vprintln!("Recursivly querying domain: {}", print_domain(domain));
+
+    let socket = UdpSocket::bind("[::]:0")?;
+    socket.set_read_timeout(Some(Duration::new(5, 0)))?;
+
+    let servers = [ServerInfo {
+        name: CompressedName(vec![b".".to_vec()]), // Empty
+        ip: Some(GOOGLE_SERVER_IP),
+    }];
+
+    let resp_bytes = &send_and_receive(&message, &socket, &servers)?;
+    let response = Message::from_bytes(resp_bytes)?;
+
+    let response_type = response.get_type();
+
+    match response_type {
+        ResponseType::Answer => {
+            let ips = response.get_answer_ips();
+            if !ips.is_empty() {
+                return Ok(ips);
+            }
+            eprintln!("Invalid format of response");
+
+            Err(DnsError::InvalidFormat)
+        }
+        _ => {
+            eprintln!("Invalid format of response");
+
+            Err(DnsError::InvalidFormat)
+        }
+    }
 }

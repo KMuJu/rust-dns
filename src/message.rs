@@ -53,9 +53,9 @@ pub enum ResponseType {
 }
 
 impl<'a> Message<'a> {
-    pub fn new(id: u16, domain: &'a [u8]) -> Self {
+    pub fn new(id: u16, domain: &'a [u8], recursion: bool) -> Self {
         Self {
-            header: Header::new(id, false, false, false, false, 0),
+            header: Header::new(id, false, false, false, recursion, 0),
             questions: vec![Question::<'a> {
                 qname: domain,
                 qtype: 1,

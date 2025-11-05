@@ -23,32 +23,39 @@ fn parse_args(args: &[String]) -> Result<Options, DnsError> {
         let mut verbose = false;
         let mut recursive = false;
         let mut domain = None;
+        let mut error = false;
         for arg in args[1..].iter() {
             if arg == "-v" || arg == "--verbose" {
                 if verbose {
-                    return Err(DnsError::WrongArgs);
+                    error = true;
+                    break;
                 }
                 verbose = true;
             } else if arg == "-r" || arg == "--recursive" {
                 if recursive {
-                    return Err(DnsError::WrongArgs);
+                    error = true;
+                    break;
                 }
                 recursive = true;
             } else {
                 if domain.is_some() {
-                    return Err(DnsError::WrongArgs);
+                    error = true;
+                    break;
                 }
                 domain = Some(arg);
             }
         }
-
-        let domain = domain.ok_or(DnsError::WrongArgs)?;
-        let options = Options {
-            verbose,
-            recursive,
-            domain,
-        };
-        Ok(options)
+        if error {
+            Err(DnsError::WrongArgs)
+        } else {
+            let domain = domain.ok_or(DnsError::WrongArgs)?;
+            let options = Options {
+                verbose,
+                recursive,
+                domain,
+            };
+            Ok(options)
+        }
     };
     match res {
         Err(_) => {
@@ -61,9 +68,13 @@ fn parse_args(args: &[String]) -> Result<Options, DnsError> {
 
 fn main() -> Result<(), DnsError> {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 || args.len() > 4 {
+    if args.len() < 2 {
         print_usage(&args[0]);
         return Err(DnsError::WrongArgs);
+    }
+    if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
+        print_usage(&args[0]);
+        return Ok(());
     }
     let options = parse_args(&args)?;
 

@@ -8,22 +8,30 @@ fn print_usage(program: &String) {
 }
 
 fn parse_args(args: &[String]) -> Result<(Option<LevelFilter>, &String), DnsError> {
-    let mut filter_level = None;
-    let mut domain = None;
-    for arg in args[1..].iter() {
-        if arg == "-v" || arg == "--verbose" {
-            filter_level = Some(log::LevelFilter::Debug);
-        } else {
-            if domain.is_some() {
-                print_usage(&args[0]);
-                return Err(DnsError::WrongArgs);
+    let res = {
+        let mut filter_level = None;
+        let mut domain = None;
+        for arg in args[1..].iter() {
+            if arg == "-v" || arg == "--verbose" {
+                filter_level = Some(log::LevelFilter::Debug);
+            } else {
+                if domain.is_some() {
+                    return Err(DnsError::WrongArgs);
+                }
+                domain = Some(arg);
             }
-            domain = Some(arg);
         }
-    }
 
-    let domain = domain.ok_or(DnsError::WrongArgs)?;
-    Ok((filter_level, domain))
+        let domain = domain.ok_or(DnsError::WrongArgs)?;
+        Ok((filter_level, domain))
+    };
+    match res {
+        Err(_) => {
+            print_usage(&args[0]);
+            res
+        }
+        _ => res,
+    }
 }
 
 fn main() -> Result<(), DnsError> {

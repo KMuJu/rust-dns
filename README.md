@@ -4,9 +4,6 @@ Simple dns resolver tool
 
 ## Features
 
+- Recursive dns stub, using 8.8.8.8
 - Non recursive solving of domain names
-
-## TODO
-
-Stuff that is not implemented
-
+- Option to enable verbose logging

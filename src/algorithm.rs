@@ -1,10 +1,8 @@
+use rand::random;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     time::Duration,
 };
-
-use log::{debug, error};
-use rand::random;
 
 use crate::{
     compression::CompressedName,
@@ -12,6 +10,7 @@ use crate::{
     message::{Encodable, Message, ResponseType, error_in_message},
     net::convert_mapped_addr,
     server_info::{ServerInfo, sort_server_list},
+    vprintln,
 };
 
 const MAX_DEPTH: usize = 8;
@@ -46,16 +45,16 @@ fn send_and_receive(
 
     for server in servers.iter() {
         let ip = server.ip.unwrap_or(ROOT_SERVER_IP);
-        debug!("Sending message to: {:?}", ip);
+        vprintln!("Sending message to: {:?}", ip);
         if let Err(e) = socket.send_to(&buf, SocketAddr::new(ip, PORT)) {
-            error!("Errored in send_to: {}", e);
+            eprintln!("Errored in send_to: {}", e);
             continue;
         }
         match socket.recv_from(&mut recv) {
             Ok((l, recv_addr)) => {
                 let recv_ip = convert_mapped_addr(recv_addr.ip());
                 if recv_ip != ip {
-                    error!(
+                    eprintln!(
                         "Received ip({}) is not the same as the one sent to({})",
                         recv_ip, ip
                     );
@@ -66,7 +65,7 @@ fn send_and_receive(
                 }
             }
             Err(e) => {
-                error!("Could not receive from socket: {}", e);
+                eprintln!("Could not receive from socket: {}", e);
             }
         }
     }
@@ -104,7 +103,7 @@ fn handle_delegation(
 
     let names = response.get_authorities_info(resp_bytes);
     for name in names.iter() {
-        debug!("- {}", name);
+        vprintln!("- {}", name);
     }
     if names.is_empty() {
         return Err(DnsError::InvalidFormat);
@@ -121,7 +120,7 @@ fn handle_delegation(
                     .collect());
             }
             Err(e) => {
-                error!("Error quering: {}", e);
+                eprintln!("Error quering: {}", e);
             }
         }
     }
@@ -131,8 +130,8 @@ fn handle_delegation(
 
 pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
     let message = Message::new(random::<u16>(), domain);
-    debug!("Querying domain: {}", print_domain(domain));
-    debug!("");
+    vprintln!("Querying domain: {}", print_domain(domain));
+    vprintln!("");
 
     let socket = UdpSocket::bind("[::]:0")?;
     socket.set_read_timeout(Some(Duration::new(5, 0)))?;
@@ -149,7 +148,7 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
 
         match response_type {
             ResponseType::Error => {
-                error!("Invalid format of response");
+                eprintln!("Invalid format of response");
                 return Err(DnsError::InvalidFormat);
             }
             ResponseType::Answer => {
@@ -161,7 +160,7 @@ pub fn query_domain(domain: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
                 for name in cnames {
                     match query_domain(&name.to_vec()) {
                         Ok(ips) => return Ok(ips),
-                        Err(e) => error!("Error when querying cname: {}", e),
+                        Err(e) => eprintln!("Error when querying cname: {}", e),
                     };
                 }
                 break;

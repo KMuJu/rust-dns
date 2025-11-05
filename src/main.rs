@@ -1,19 +1,20 @@
+use rust_dns::{
+    algorithm::query_domain, compression::compress_domain, error::DnsError, log::set_verbose,
+    vprintln,
+};
 use std::env;
-
-use log::{LevelFilter, info};
-use rust_dns::{algorithm::query_domain, compression::compress_domain, error::DnsError};
 
 fn print_usage(program: &String) {
     println!("{} [--verbose] domain", program);
 }
 
-fn parse_args(args: &[String]) -> Result<(Option<LevelFilter>, &String), DnsError> {
+fn parse_args(args: &[String]) -> Result<(bool, &String), DnsError> {
     let res = {
-        let mut filter_level = None;
+        let mut verbose = false;
         let mut domain = None;
         for arg in args[1..].iter() {
             if arg == "-v" || arg == "--verbose" {
-                filter_level = Some(log::LevelFilter::Debug);
+                verbose = true;
             } else {
                 if domain.is_some() {
                     return Err(DnsError::WrongArgs);
@@ -23,7 +24,7 @@ fn parse_args(args: &[String]) -> Result<(Option<LevelFilter>, &String), DnsErro
         }
 
         let domain = domain.ok_or(DnsError::WrongArgs)?;
-        Ok((filter_level, domain))
+        Ok((verbose, domain))
     };
     match res {
         Err(_) => {
@@ -40,16 +41,15 @@ fn main() -> Result<(), DnsError> {
         print_usage(&args[0]);
         return Err(DnsError::WrongArgs);
     }
-    let (filter_level, domain) = parse_args(&args)?;
+    let (is_verbose, domain) = parse_args(&args)?;
 
-    env_logger::Builder::new()
-        .filter_level(filter_level.unwrap_or(log::LevelFilter::Info))
-        .init();
+    set_verbose(is_verbose);
     let compressed_domain = compress_domain(domain);
     let ips = query_domain(&compressed_domain)?;
-    info!("The ips for {} is:", domain);
+    vprintln!();
+    println!("The ips for {} is:", domain);
     for &ip in ips.iter() {
-        info!("{:?}", ip);
+        println!("{:?}", ip);
     }
     Ok(())
 }
@@ -68,7 +68,7 @@ mod test {
 
         let output = parse_args(&args);
         match output {
-            Ok((l, d)) if d == "domain" && l == Some(log::LevelFilter::Debug) => {}
+            Ok((l, d)) if d == "domain" && l => {}
             o => panic!(
                 "Test failed, got {:?}, expected Ok((\"domain\", Some(log::LevelFilter::Debug)))",
                 o
@@ -82,7 +82,7 @@ mod test {
 
         let output = parse_args(&args);
         match output {
-            Ok((l, d)) if d == "domain" && l.is_none() => {}
+            Ok((l, d)) if d == "domain" && !l => {}
             o => panic!("Test failed, got {:?}, expected Ok((\"domain\", None))", o),
         }
     }
